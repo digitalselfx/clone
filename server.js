@@ -24,9 +24,17 @@ const TRAIT_LABELS = {
   N: "Neuroticism",
 };
 
+// Wraps an async route/middleware handler so a rejected promise is passed to
+// Express's error handler instead of crashing the whole Node process.
+// Without this, one failed query (e.g. a missing table) takes the entire
+// app down for every user, not just the one request that failed.
+function wrapAsync(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
 // --- Users -----------------------------------------------------------
 
-app.post("/api/users", async (req, res) => {
+app.post("/api/users", wrapAsync(async (req, res) => {
   const { name, slug } = req.body;
   if (!slug) return res.status(400).json({ error: "slug required" });
 
@@ -41,13 +49,13 @@ app.post("/api/users", async (req, res) => {
     if (err.code === "23505") return res.status(409).json({ error: "slug already taken" });
     throw err;
   }
-});
+}));
 
 // Resolves the user from the request's subdomain, e.g. vladimir.digital-selfx.com -> slug 'vladimir'.
 // Attaches req.cloneUser if found. Requests to the bare domain or unknown subdomains pass through unresolved.
 const ROOT_DOMAIN = process.env.ROOT_DOMAIN || "digital-selfx.com";
 
-async function resolveSubdomain(req, res, next) {
+app.use(wrapAsync(async (req, res, next) => {
   const host = (req.hostname || "").toLowerCase();
   if (host === ROOT_DOMAIN || host === `www.${ROOT_DOMAIN}`) return next();
 
@@ -59,9 +67,7 @@ async function resolveSubdomain(req, res, next) {
   const { rows } = await query("SELECT id, name, slug FROM users WHERE slug = $1", [slug]);
   if (rows[0]) req.cloneUser = rows[0];
   next();
-}
-
-app.use(resolveSubdomain);
+}));
 
 // Subdomain-based endpoints — no userId needed in the path, resolved from the Host header.
 app.get("/api/me", (req, res) => {
@@ -69,17 +75,17 @@ app.get("/api/me", (req, res) => {
   res.json(req.cloneUser);
 });
 
-app.post("/api/me/chat", async (req, res) => {
+app.post("/api/me/chat", wrapAsync(async (req, res) => {
   if (!req.cloneUser) return res.status(404).json({ error: "no clone found for this subdomain" });
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
   const reply = await handleChat(req.cloneUser.id, message);
   res.json({ reply });
-});
+}));
 
 // --- Profile answers ---------------------------------------------------
 
-app.post("/api/profile/:userId", async (req, res) => {
+app.post("/api/profile/:userId", wrapAsync(async (req, res) => {
   const { userId } = req.params;
   const { key, value } = req.body;
   if (!key || !value) return res.status(400).json({ error: "key and value required" });
@@ -91,9 +97,9 @@ app.post("/api/profile/:userId", async (req, res) => {
     [userId, key, value]
   );
   res.json({ ok: true });
-});
+}));
 
-app.get("/api/profile/:userId", async (req, res) => {
+app.get("/api/profile/:userId", wrapAsync(async (req, res) => {
   const { rows } = await query(
     "SELECT key, value FROM profile_answers WHERE user_id = $1",
     [req.params.userId]
@@ -101,11 +107,11 @@ app.get("/api/profile/:userId", async (req, res) => {
   const profile = {};
   rows.forEach((r) => (profile[r.key] = r.value));
   res.json(profile);
-});
+}));
 
 // --- Personality (Big Five) --------------------------------------------
 
-app.post("/api/personality/:userId", async (req, res) => {
+app.post("/api/personality/:userId", wrapAsync(async (req, res) => {
   const { userId } = req.params;
   const { scores } = req.body; // { O: 3.5, C: 4.0, E: 2.5, A: 4.5, N: 2.0 }
   if (!scores) return res.status(400).json({ error: "scores required" });
@@ -120,9 +126,9 @@ app.post("/api/personality/:userId", async (req, res) => {
     );
   }
   res.json({ ok: true });
-});
+}));
 
-app.get("/api/personality/:userId", async (req, res) => {
+app.get("/api/personality/:userId", wrapAsync(async (req, res) => {
   const { rows } = await query(
     "SELECT trait, score FROM personality WHERE user_id = $1",
     [req.params.userId]
@@ -130,7 +136,7 @@ app.get("/api/personality/:userId", async (req, res) => {
   const scores = {};
   rows.forEach((r) => (scores[r.trait] = Number(r.score)));
   res.json(scores);
-});
+}));
 
 // --- Chat ----------------------------------------------------------------
 
@@ -197,26 +203,38 @@ async function handleChat(userId, message) {
   return reply;
 }
 
-app.post("/api/chat/:userId", async (req, res) => {
+app.post("/api/chat/:userId", wrapAsync(async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "message required" });
   const reply = await handleChat(req.params.userId, message);
   res.json({ reply });
-});
+}));
 
-app.get("/api/chat/:userId", async (req, res) => {
+app.get("/api/chat/:userId", wrapAsync(async (req, res) => {
   const { rows } = await query(
     "SELECT role, content, created_at FROM messages WHERE user_id = $1 ORDER BY created_at ASC",
     [req.params.userId]
   );
   res.json(rows);
-});
+}));
+
+// --- Health check (for debugging deploys separately from the app logic) ---
+
+app.get("/healthz", (req, res) => res.json({ ok: true }));
 
 // --- Static frontend (served identically on every subdomain) -----------
 
 app.use(express.static(path.join(__dirname, "public")));
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// --- Error handler (must be last) ---------------------------------------
+// Catches anything passed to next(err) by wrapAsync, logs it, and returns a
+// normal 500 response instead of letting the failure crash the process.
+app.use((err, req, res, next) => {
+  console.error("Request failed:", err);
+  res.status(500).json({ error: "Something went wrong. Check the server logs." });
 });
 
 const PORT = process.env.PORT || 3000;
