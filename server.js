@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
+import nodemailer from "nodemailer";
 import { query } from "./db.js";
 
 dotenv.config();
@@ -26,11 +27,57 @@ const TRAIT_LABELS = {
 
 // Wraps an async route/middleware handler so a rejected promise is passed to
 // Express's error handler instead of crashing the whole Node process.
-// Without this, one failed query (e.g. a missing table) takes the entire
-// app down for every user, not just the one request that failed.
 function wrapAsync(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
+
+// --- Lead capture (the "Create your clone" button on the landing page) ---
+// Collects a name + email and emails the team, instead of auto-creating a
+// subdomain. Onboarding becomes manual/sales-assisted rather than self-serve.
+
+const LEAD_EMAIL_TO = process.env.LEAD_EMAIL_TO || "info@digital-selfx.com";
+
+let mailer = null;
+function getMailer() {
+  if (mailer) return mailer;
+  if (!process.env.SMTP_HOST) return null;
+  mailer = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: Number(process.env.SMTP_PORT || 465) === 465,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+  return mailer;
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+app.post("/api/leads", wrapAsync(async (req, res) => {
+  const { name, email } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: "name required" });
+  if (!email || !isValidEmail(email)) return res.status(400).json({ error: "a valid email is required" });
+
+  const transporter = getMailer();
+  if (!transporter) {
+    console.error("Lead received but SMTP is not configured:", { name, email });
+    return res.status(500).json({ error: "email delivery is not configured yet" });
+  }
+
+  await transporter.sendMail({
+    from: process.env.SMTP_USER,
+    to: LEAD_EMAIL_TO,
+    replyTo: email,
+    subject: `New clone request: ${name.trim()}`,
+    text: `Name: ${name.trim()}\nEmail: ${email.trim()}\n\nSubmitted via the "Create your clone" button on digital-selfx.com.`,
+  });
+
+  res.json({ ok: true });
+}));
 
 // --- Users -----------------------------------------------------------
 
@@ -52,7 +99,6 @@ app.post("/api/users", wrapAsync(async (req, res) => {
 }));
 
 // Resolves the user from the request's subdomain, e.g. vladimir.digital-selfx.com -> slug 'vladimir'.
-// Attaches req.cloneUser if found. Requests to the bare domain or unknown subdomains pass through unresolved.
 const ROOT_DOMAIN = process.env.ROOT_DOMAIN || "digital-selfx.com";
 
 app.use(wrapAsync(async (req, res, next) => {
@@ -69,7 +115,6 @@ app.use(wrapAsync(async (req, res, next) => {
   next();
 }));
 
-// Subdomain-based endpoints — no userId needed in the path, resolved from the Host header.
 app.get("/api/me", (req, res) => {
   if (!req.cloneUser) return res.status(404).json({ error: "no clone found for this subdomain" });
   res.json(req.cloneUser);
@@ -113,7 +158,7 @@ app.get("/api/profile/:userId", wrapAsync(async (req, res) => {
 
 app.post("/api/personality/:userId", wrapAsync(async (req, res) => {
   const { userId } = req.params;
-  const { scores } = req.body; // { O: 3.5, C: 4.0, E: 2.5, A: 4.5, N: 2.0 }
+  const { scores } = req.body;
   if (!scores) return res.status(400).json({ error: "scores required" });
 
   const entries = Object.entries(scores);
@@ -218,8 +263,6 @@ app.get("/api/chat/:userId", wrapAsync(async (req, res) => {
   res.json(rows);
 }));
 
-// --- Health check (for debugging deploys separately from the app logic) ---
-
 app.get("/healthz", (req, res) => res.json({ ok: true }));
 
 // --- Static frontend (served identically on every subdomain) -----------
@@ -229,9 +272,6 @@ app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// --- Error handler (must be last) ---------------------------------------
-// Catches anything passed to next(err) by wrapAsync, logs it, and returns a
-// normal 500 response instead of letting the failure crash the process.
 app.use((err, req, res, next) => {
   console.error("Request failed:", err);
   res.status(500).json({ error: "Something went wrong. Check the server logs." });
