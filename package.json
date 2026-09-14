@@ -1,7 +1,7 @@
 {
   "name": "reflection-clone-backend",
   "version": "0.1.0",
-  "description": "Phase 1 backend for the personal reflection clone app",
+  "description": "Backend for the digital-selfx landing page and clone app",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "nodemailer": "^6.9.14",
     "pg": "^8.12.0"
   }
 }
