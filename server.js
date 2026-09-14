@@ -68,12 +68,26 @@ app.post("/api/leads", wrapAsync(async (req, res) => {
     return res.status(500).json({ error: "email delivery is not configured yet" });
   }
 
-  await transporter.sendMail({
+  const info = await transporter.sendMail({
     from: process.env.SMTP_USER,
     to: LEAD_EMAIL_TO,
     replyTo: email,
     subject: `New clone request: ${name.trim()}`,
     text: `Name: ${name.trim()}\nEmail: ${email.trim()}\n\nSubmitted via the "Create your clone" button on digital-selfx.com.`,
+  });
+
+  // Log the SMTP server's actual response so we can see whether the message
+  // was truly accepted for the intended recipient, not just that sendMail()
+  // didn't throw. "accepted"/"rejected" list the addresses; "response" is
+  // the raw line the mail server sent back (often reveals quarantine,
+  // greylisting, or a soft rejection that isn't a hard error).
+  console.log("Lead email send result:", {
+    to: LEAD_EMAIL_TO,
+    from: process.env.SMTP_USER,
+    accepted: info.accepted,
+    rejected: info.rejected,
+    response: info.response,
+    messageId: info.messageId,
   });
 
   res.json({ ok: true });
